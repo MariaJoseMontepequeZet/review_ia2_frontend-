@@ -1,0 +1,9 @@
+{
+  "name": "review_ia2_frontend",
+  "version": "1.0.0",
+  "description": "Interfaz web de la Biblioteca semántica (CRUD + búsqueda por significado)",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

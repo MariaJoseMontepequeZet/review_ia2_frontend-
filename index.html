@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Biblioteca semántica</title>
+<style>
+  :root { --bg:#f6f7fb; --card:#fff; --tx:#1c2033; --mut:#6b7190; --pri:#4f46e5; --bor:#e3e5ef; --red:#dc2626; --grn:#16a34a; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#12141f; --card:#1b1e2e; --tx:#e8eaf6; --mut:#9aa0c0; --bor:#2b2f45; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--tx); }
+  main { max-width:960px; margin:0 auto; padding:24px 16px 60px; }
+  h1 { margin:0 0 4px; font-size:26px; } .sub { color:var(--mut); margin:0 0 16px; }
+  section { background:var(--card); border:1px solid var(--bor); border-radius:12px; padding:16px; margin-bottom:18px; }
+  h2 { margin:0 0 12px; font-size:17px; } .hint { color:var(--mut); font-size:13px; margin:-6px 0 12px; }
+  input, textarea, select { width:100%; padding:9px 11px; border:1px solid var(--bor); border-radius:8px; background:var(--bg); color:var(--tx); font:inherit; }
+  textarea { min-height:90px; resize:vertical; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; } .row > * { flex:1 1 160px; } .row > .fix { flex:0 0 auto; }
+  label { display:block; font-size:13px; color:var(--mut); margin:10px 0 4px; }
+  button { padding:9px 16px; border:0; border-radius:8px; background:var(--pri); color:#fff; font:inherit; cursor:pointer; }
+  button.sec { background:transparent; color:var(--tx); border:1px solid var(--bor); }
+  button.del { background:transparent; color:var(--red); border:1px solid var(--bor); }
+  button:disabled { opacity:.5; cursor:wait; }
+  .doc { border-top:1px solid var(--bor); padding:12px 0; } .doc:first-of-type { border-top:0; }
+  .doc h3 { margin:0; font-size:16px; } .doc p { margin:6px 0; white-space:pre-wrap; }
+  .tag { display:inline-block; font-size:12px; background:var(--bg); border:1px solid var(--bor); border-radius:99px; padding:1px 9px; color:var(--mut); margin-left:6px; }
+  .score { font-size:12px; color:var(--grn); font-weight:600; margin-left:6px; }
+  .acts { display:flex; gap:6px; flex-wrap:wrap; } .acts button { padding:4px 10px; font-size:13px; }
+  .msg { min-height:20px; margin-top:8px; font-size:13px; color:var(--mut); } .msg.err { color:var(--red); }
+  .empty { color:var(--mut); text-align:center; padding:14px; }
+  pre.vec { background:var(--bg); border:1px solid var(--bor); border-radius:8px; padding:10px; font-size:12px; max-height:160px; overflow:auto; white-space:pre-wrap; word-break:break-all; margin:6px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Biblioteca semántica</h1>
+  <p class="sub">App → Gemini (texto → embedding) → Qdrant (guardar y buscar por significado)</p>
+
+
+  <!-- ============ DOCUMENTOS ============ -->
+      <section>
+      <h2>Buscar</h2>
+      <form id="fBuscar" class="row">
+        <input id="consulta" placeholder="Ej: ¿cómo se guardan los vectores?" required>
+        <select id="cat" class="fix" style="width:auto"><option value="">Todas las categorías</option></select>
+        <button class="fix">Buscar</button>
+        <button type="button" id="limpiar" class="sec fix" hidden>Ver todos</button>
+      </form>
+    </section>
+
+    <section>
+      <h2 id="tForm">Nuevo documento</h2>
+      <form id="fDoc">
+        <div class="row">
+          <div><label>Título</label><input id="titulo" required maxlength="150"></div>
+          <div><label>Categoría</label><input id="categoria" placeholder="General" maxlength="40"></div>
+        </div>
+        <label>Contenido</label><textarea id="contenido" required></textarea>
+        <div class="row" style="margin-top:12px">
+          <button id="guardar" class="fix">Guardar</button>
+          <button type="button" id="cancelar" class="sec fix" hidden>Cancelar edición</button>
+        </div>
+      </form>
+      <div id="msg" class="msg"></div>
+    </section>
+
+    <section>
+      <h2 id="tLista">Documentos</h2>
+      <div id="lista"></div>
+      <div class="row" style="margin-top:10px"><button id="mas" class="sec fix" hidden>Cargar más</button></div>
+    </section>
+</main>
+
+<script src="config.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(url, opt = {}) {
+  const r = await fetch(API_URL + url, { headers: { 'Content-Type': 'application/json' }, ...opt });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || 'Error');
+  return d;
+}
+
+/* ---------- documentos (CRUD + búsqueda) ---------- */
+let editId = null, siguiente = null, modoBusqueda = false;
+const cache = new Map();
+function aviso(t, err) { $('msg').textContent = t; $('msg').className = 'msg' + (err ? ' err' : ''); }
+
+function tarjeta(p, score) {
+  const d = p.payload; cache.set(p.id, d);
+  return `<div class="doc"><div class="row" style="align-items:flex-start">
+    <h3>${esc(d.titulo)}<span class="tag">${esc(d.categoria)}</span>${score != null ? `<span class="score">${(score*100).toFixed(1)}% similar</span>` : ''}</h3>
+    <div class="acts fix"><button class="sec" data-vec="${p.id}">Ver embedding</button><button class="sec" data-ed="${p.id}">Editar</button><button class="del" data-del="${p.id}">Eliminar</button></div>
+  </div><p>${esc(d.contenido)}</p><div id="v-${p.id}"></div></div>`;
+}
+
+function actualizarCategorias() {
+  const sel = $('cat'), actual = sel.value;
+  const cats = [...new Set([...cache.values()].map(d => d.categoria))].sort();
+  sel.innerHTML = '<option value="">Todas las categorías</option>' + cats.map(c => `<option ${c===actual?'selected':''}>${esc(c)}</option>`).join('');
+}
+
+async function cargar(reset = true) {
+  modoBusqueda = false; $('limpiar').hidden = true; $('tLista').textContent = 'Documentos';
+  if (reset) { siguiente = null; $('lista').innerHTML = ''; }
+  const d = await api('/api/documentos' + (siguiente ? `?offset=${encodeURIComponent(siguiente)}` : ''));
+  $('lista').insertAdjacentHTML('beforeend', d.puntos.map(p => tarjeta(p)).join(''));
+  if (!$('lista').children.length) $('lista').innerHTML = '<div class="empty">Aún no hay documentos. Crea el primero arriba.</div>';
+  siguiente = d.siguiente; $('mas').hidden = !siguiente;
+  actualizarCategorias();
+}
+
+function salirEdicion() { editId = null; $('fDoc').reset(); $('tForm').textContent = 'Nuevo documento'; $('cancelar').hidden = true; }
+
+$('fDoc').onsubmit = async e => {
+  e.preventDefault(); $('guardar').disabled = true; aviso('Generando embedding y guardando…');
+  const body = JSON.stringify({ titulo: $('titulo').value, contenido: $('contenido').value, categoria: $('categoria').value });
+  try {
+    if (editId) await api('/api/documentos/' + editId, { method: 'PUT', body });
+    else await api('/api/documentos', { method: 'POST', body });
+    aviso(editId ? 'Documento actualizado ✔' : 'Documento creado ✔'); salirEdicion(); await cargar();
+  } catch (err) { aviso(err.message, true); }
+  $('guardar').disabled = false;
+};
+$('cancelar').onclick = () => { salirEdicion(); aviso(''); };
+
+$('fBuscar').onsubmit = async e => {
+  e.preventDefault(); $('lista').innerHTML = '<div class="empty">Buscando…</div>';
+  try {
+    const r = await api('/api/buscar', { method: 'POST', body: JSON.stringify({ consulta: $('consulta').value, categoria: $('cat').value, limite: 8 }) });
+    modoBusqueda = true; $('mas').hidden = true; $('limpiar').hidden = false; $('tLista').textContent = 'Resultados';
+    $('lista').innerHTML = r.length ? r.map(p => tarjeta(p, p.score)).join('') : '<div class="empty">Sin resultados.</div>';
+  } catch (err) { $('lista').innerHTML = ''; aviso(err.message, true); }
+};
+$('limpiar').onclick = () => { $('consulta').value = ''; cargar(); };
+$('mas').onclick = () => cargar(false);
+
+$('lista').onclick = async e => {
+  const { ed, del, vec } = e.target.dataset;
+  if (ed) {
+    const d = cache.get(ed); editId = ed;
+    $('titulo').value = d.titulo; $('contenido').value = d.contenido; $('categoria').value = d.categoria;
+    $('tForm').textContent = 'Editando documento'; $('cancelar').hidden = false; $('titulo').focus(); scrollTo({ top: 0, behavior: 'smooth' });
+  }
+  if (vec) {
+    const box = $('v-' + vec);
+    if (box.innerHTML) { box.innerHTML = ''; return; }
+    try {
+      const p = await api(`/api/documentos/${vec}?vector=1`), v = p.vector;
+      const norma = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+      box.innerHTML = `<div class="meta">${v.length} dimensiones · norma ${norma.toFixed(3)} · métrica Cosine</div><pre class="vec">[${v.map(x => x.toFixed(4)).join(', ')}]</pre>`;
+    } catch (err) { aviso(err.message, true); }
+  }
+  if (del && confirm('¿Eliminar este documento? No se puede deshacer.')) {
+    try { await api('/api/documentos/' + del, { method: 'DELETE' }); aviso('Eliminado ✔'); modoBusqueda ? $('fBuscar').requestSubmit() : cargar(); }
+    catch (err) { aviso(err.message, true); }
+  }
+};
+
+cargar().catch(err => aviso(err.message, true));
+</script>
+</body>
+</html>
